@@ -896,19 +896,25 @@ func main() {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Heartbeat("/healthz"))
 	r.Use(middleware.Timeout(30 * time.Second))
-	r.Use(httprate.LimitByIP(100, 1*time.Minute))
 	if len(allowedOrigins) > 0 {
 		r.Use(corsMiddleware(allowedOrigins))
 	}
 	r.Use(securityHeaders())
 
-	r.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/docs", http.StatusFound) })
-	r.Get("/docs", srv.handleDocs)
-	r.Get("/mailing_lists", srv.handleMailingLists)
-	r.Get("/emails", srv.handleEmails)
-	r.Get("/emails/{id}/view", srv.handleEmailView)
-	r.Get("/emails/{id}/views/stream", srv.handleEmailViewsStream)
-	r.Get("/mailing_lists/emails", srv.handleMailingListsEmails)
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.LimitByIP(100, 1*time.Minute))
+		r.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/docs", http.StatusFound) })
+		r.Get("/docs", srv.handleDocs)
+		r.Get("/mailing_lists", srv.handleMailingLists)
+		r.Get("/emails", srv.handleEmails)
+		r.Get("/emails/{id}/view", srv.handleEmailView)
+		r.Get("/mailing_lists/emails", srv.handleMailingListsEmails)
+	})
+
+	r.Group(func(r chi.Router) {
+		r.Use(httprate.LimitByIP(1000, 1*time.Minute))
+		r.Get("/emails/{id}/views/stream", srv.handleEmailViewsStream)
+	})
 
 	addr := env("HOST", "127.0.0.1") + ":" + env("PORT", "8080")
 	log.Printf("listening on %s", addr)
