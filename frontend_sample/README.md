@@ -8,8 +8,8 @@ Create a `.env.local` file in the root directory with the following variables:
 
 ```bash
 # CMS API Configuration
-CMS_API_BASE_URL=http://localhost:8080
-NEXT_PUBLIC_CMS_API_BASE_URL=http://localhost:8080
+CMS_API_BASE_URL=https://news-api.zachlatta.com
+NEXT_PUBLIC_CMS_API_BASE_URL=https://news-api.zachlatta.com
 ```
 
 ### Variable Descriptions
@@ -28,7 +28,27 @@ The application will be available at `http://localhost:3000`.
 
 ## Production Deployment
 
-Update the environment variables to point to your production CMS API:
+### Docker Deployment
+
+The Dockerfile is configured with production environment variables. To deploy:
+
+```bash
+docker build -t hack-club-news .
+docker run -p 3000:3000 hack-club-news
+```
+
+### Other Platforms
+
+For other hosting platforms (Vercel, Netlify, etc.), set these environment variables:
+
+```bash
+CMS_API_BASE_URL=https://news-api.zachlatta.com
+NEXT_PUBLIC_CMS_API_BASE_URL=https://news-api.zachlatta.com
+```
+
+### Custom API URL
+
+To use a different CMS API, update the environment variables:
 
 ```bash
 CMS_API_BASE_URL=https://your-cms-api.com

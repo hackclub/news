@@ -14,6 +14,8 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV CMS_API_BASE_URL=https://news-api.zachlatta.com
+ENV NEXT_PUBLIC_CMS_API_BASE_URL=https://news-api.zachlatta.com
 
 RUN pnpm run build
 
@@ -22,6 +24,8 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV CMS_API_BASE_URL=https://news-api.zachlatta.com
+ENV NEXT_PUBLIC_CMS_API_BASE_URL=https://news-api.zachlatta.com
 
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
