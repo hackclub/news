@@ -1,0 +1,6 @@
+news-server
+server.log
+tmp/
+.git/
+frontend_sample/
+*.log
