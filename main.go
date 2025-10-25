@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
@@ -53,6 +54,7 @@ type MailingList struct {
 type EmailStats struct {
 	Opens  int64 `json:"opens"`
 	Clicks int64 `json:"clicks"`
+	Views  int64 `json:"views"`
 }
 
 type Email struct {
@@ -121,6 +123,14 @@ func weakETag(payload []byte) string {
 	return `W/"` + hex.EncodeToString(sum[:]) + `"`
 }
 
+func generateSessionID() string {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err)
+	}
+	return hex.EncodeToString(b)
+}
+
 // ---------- Very small TTL cache ----------
 
 type cacheItem struct {
@@ -178,10 +188,11 @@ func cacheKey(r *http.Request) string {
 // ---------- Database layer ----------
 
 type Store struct {
-	pool *pgxpool.Pool
+	pool        *pgxpool.Pool
+	metricsPool *pgxpool.Pool
 }
 
-func NewStore(ctx context.Context, url string) (*Store, error) {
+func NewStore(ctx context.Context, url string, metricsURL string) (*Store, error) {
 	if os.Getenv("ALLOW_DB_INSECURE") != "1" && !strings.Contains(url, "sslmode=") {
 		sep := "?"
 		if strings.Contains(url, "?") {
@@ -207,7 +218,75 @@ func NewStore(ctx context.Context, url string) (*Store, error) {
 	if err := pool.Ping(ctx2); err != nil {
 		return nil, err
 	}
-	return &Store{pool: pool}, nil
+
+	var metricsPool *pgxpool.Pool
+	if metricsURL != "" {
+		metricsCfg, err := pgxpool.ParseConfig(metricsURL)
+		if err != nil {
+			return nil, fmt.Errorf("metrics db config: %w", err)
+		}
+		metricsCfg.MaxConns = 5
+		metricsCfg.MinConns = 1
+		metricsPool, err = pgxpool.NewWithConfig(ctx, metricsCfg)
+		if err != nil {
+			return nil, fmt.Errorf("metrics db connect: %w", err)
+		}
+		if err := metricsPool.Ping(ctx2); err != nil {
+			return nil, fmt.Errorf("metrics db ping: %w", err)
+		}
+	}
+
+	return &Store{pool: pool, metricsPool: metricsPool}, nil
+}
+
+func (s *Store) RunMetricsMigrations(ctx context.Context) error {
+	if s.metricsPool == nil {
+		log.Println("metrics database not configured, skipping migrations")
+		return nil
+	}
+
+	log.Println("running metrics database migrations...")
+
+	migrations := []string{
+		`CREATE TABLE IF NOT EXISTS email_views (
+			time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			session_id TEXT NOT NULL,
+			email_id TEXT NOT NULL
+		)`,
+		
+		`SELECT create_hypertable('email_views', 'time', if_not_exists => TRUE)`,
+		
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_email_views_dedup 
+		ON email_views (session_id, email_id, time_bucket('5 minutes', time), time)`,
+		
+		`CREATE MATERIALIZED VIEW IF NOT EXISTS email_view_counts
+		WITH (timescaledb.continuous) AS
+		SELECT 
+			time_bucket('1 hour', time) as bucket,
+			email_id,
+			COUNT(DISTINCT session_id) as view_count
+		FROM email_views
+		GROUP BY bucket, email_id
+		WITH NO DATA`,
+		
+		`SELECT add_continuous_aggregate_policy('email_view_counts',
+			start_offset => INTERVAL '1 day',
+			end_offset => INTERVAL '1 hour',
+			schedule_interval => INTERVAL '1 hour',
+			if_not_exists => TRUE)`,
+		
+		`CREATE INDEX IF NOT EXISTS idx_email_views_email_id ON email_views(email_id, time DESC)`,
+	}
+
+	for i, migration := range migrations {
+		_, err := s.metricsPool.Exec(ctx, migration)
+		if err != nil {
+			return fmt.Errorf("migration %d failed: %w", i+1, err)
+		}
+	}
+
+	log.Println("metrics database migrations completed successfully")
+	return nil
 }
 
 func (s *Store) ListMailingLists(ctx context.Context, limit, offset int) ([]MailingList, *int, error) {
@@ -339,9 +418,13 @@ LIMIT %s OFFSET %s;
 			Description: mlDesc,
 			Color:       mlColor,
 		}
+		
+		totalViews, _ := s.GetEmailViewCount(ctx, e.ID)
+		
 		e.Stats = EmailStats{
 			Opens:  opens,
 			Clicks: clicks,
+			Views:  totalViews,
 		}
 		e.HTML = html
 		e.Markdown = md
@@ -399,6 +482,61 @@ func stripTags(s string) string {
 		}
 	}
 	return strings.Join(strings.Fields(b.String()), " ")
+}
+
+func (s *Store) TrackEmailView(ctx context.Context, sessionID, emailID string) error {
+	if s.metricsPool == nil {
+		return nil
+	}
+	
+	_, err := s.metricsPool.Exec(ctx, `
+		INSERT INTO email_views (session_id, email_id)
+		VALUES ($1, $2)
+		ON CONFLICT DO NOTHING
+	`, sessionID, emailID)
+	
+	return err
+}
+
+func (s *Store) GetMetricsViewCount(ctx context.Context, emailID string) (int64, error) {
+	if s.metricsPool == nil {
+		return 0, nil
+	}
+	
+	var count int64
+	err := s.metricsPool.QueryRow(ctx, `
+		SELECT COUNT(DISTINCT session_id)
+		FROM email_views
+		WHERE email_id = $1
+	`, emailID).Scan(&count)
+	
+	if err != nil && err.Error() != "no rows in result set" {
+		return 0, nil
+	}
+	
+	return count, nil
+}
+
+func (s *Store) GetEmailViewCount(ctx context.Context, emailID string) (int64, error) {
+	metricsCount, _ := s.GetMetricsViewCount(ctx, emailID)
+	
+	var warehouseCount int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT COALESCE(SUM(unique_count), 0)
+		FROM loops.analytics_events
+		WHERE entity_type = 'campaign'
+		AND entity_id = $1
+		AND event_type = 'viewed'
+	`, emailID).Scan(&warehouseCount)
+	
+	if err != nil {
+		if !strings.Contains(err.Error(), "does not exist") && err.Error() != "no rows in result set" {
+			log.Printf("warehouse view count error: %v", err)
+		}
+		warehouseCount = 0
+	}
+	
+	return metricsCount + warehouseCount, nil
 }
 
 // ---------- HTTP Handlers ----------
@@ -498,6 +636,43 @@ type GroupedEmails struct {
 	Emails      []Email     `json:"emails"`
 }
 
+func (s *Server) handleEmailView(w http.ResponseWriter, r *http.Request) {
+	emailID := chi.URLParam(r, "id")
+	if emailID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(apiErr{Message: "missing email id"})
+		return
+	}
+
+	cookie, err := r.Cookie("_track")
+	if err != nil {
+		sessionID := generateSessionID()
+		cookie = &http.Cookie{
+			Name:     "_track",
+			Value:    sessionID,
+			MaxAge:   30 * 24 * 60 * 60,
+			HttpOnly: true,
+			SameSite: http.SameSiteLaxMode,
+			Secure:   r.TLS != nil,
+			Path:     "/",
+		}
+		http.SetCookie(w, cookie)
+	}
+
+	if err := s.store.TrackEmailView(r.Context(), cookie.Value, emailID); err != nil {
+		log.Printf("track view error: %v", err)
+	}
+
+	viewCount, err := s.store.GetEmailViewCount(r.Context(), emailID)
+	if err != nil {
+		httpError(w, err)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_ = json.NewEncoder(w).Encode(map[string]int64{"views": viewCount})
+}
+
 func (s *Server) handleMailingListsEmails(w http.ResponseWriter, r *http.Request) {
 	groupAll := r.URL.Query().Get("group_all") == "true"
 	limitPerList := 1
@@ -577,11 +752,20 @@ func main() {
 	if dbURL == "" {
 		log.Fatal("DATABASE_URL is required")
 	}
-	store, err := NewStore(ctx, dbURL)
+	metricsDBURL := os.Getenv("METRICS_DATABASE_URL")
+	
+	store, err := NewStore(ctx, dbURL, metricsDBURL)
 	if err != nil {
 		log.Fatalf("db connect: %v", err)
 	}
 	defer store.pool.Close()
+	if store.metricsPool != nil {
+		defer store.metricsPool.Close()
+	}
+
+	if err := store.RunMetricsMigrations(ctx); err != nil {
+		log.Fatalf("metrics migrations failed: %v", err)
+	}
 
 	srv := NewServer(store)
 
@@ -611,6 +795,7 @@ func main() {
 	r.Get("/docs", srv.handleDocs)
 	r.Get("/mailing_lists", srv.handleMailingLists)
 	r.Get("/emails", srv.handleEmails)
+	r.Get("/emails/{id}/view", srv.handleEmailView)
 	r.Get("/mailing_lists/emails", srv.handleMailingListsEmails)
 
 	addr := env("HOST", "127.0.0.1") + ":" + env("PORT", "8080")
