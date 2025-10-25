@@ -924,14 +924,9 @@ List **sent** emails. Returns content + stats and a compact reference to the mai
         "color": "#ec3750"
       },
       "stats": {
-        "sent_count": 3152,
         "opens": 815,
         "clicks": 82,
-        "unsubscribes": 2,
-        "hard_bounces": 0,
-        "soft_bounces": 88,
-        "open_rate": 0.2586,
-        "click_rate": 0.0260
+        "views": 1234
       },
       "html": "<!doctype html> ...",
       "markdown": "Hey there, ...",
@@ -944,7 +939,7 @@ List **sent** emails. Returns content + stats and a compact reference to the mai
 ` + "```" + `
 
 **Notes**
-- ` + "`internal_title`" + ` is the campaigns' internal ` + "`name`" + ` (useful for CMS + editor context).
+- ` + "`stats.views`" + ` combines real-time TimescaleDB tracking + warehouse analytics.
 - We do **not** expose ` + "`from_email`" + `, ` + "`reply_to_email`" + `, or any per-recipient stats.
 
 ---
@@ -997,6 +992,45 @@ We expose **email_html**, **email_markdown**, and **email_content_json** straigh
 
 ## Status & Health
 - ` + "`/healthz`" + ` returns 200 OK when the server is alive.
+
+---
+
+## GET /emails/{id}/view
+
+Track a page view for an email and return the total view count.
+
+### Behavior
+- **Automatic tracking**: Sets a ` + "`_track`" + ` cookie (30-day session ID) and records the view.
+- **Deduplication**: Same session + email + 5-minute window = counted once.
+- **Privacy-first**: Only tracks anonymous session IDs, no PII.
+- **Combined counts**: Returns views from both TimescaleDB (real-time) + warehouse analytics.
+
+### Response
+` + "```json" + `
+{
+  "views": 1234
+}
+` + "```" + `
+
+### Cookie
+The server sets ` + "`_track`" + ` cookie automatically:
+- ` + "`HttpOnly`" + `, ` + "`SameSite=Lax`" + `, ` + "`Secure`" + ` (on HTTPS)
+- ` + "`Max-Age: 2592000`" + ` (30 days)
+- Path: ` + "`/`" + `
+
+### View counts in /emails
+All ` + "`/emails`" + ` endpoints include ` + "`stats.views`" + ` with the combined count from both sources.
+
+**Example**:
+` + "```json" + `
+{
+  "stats": {
+    "opens": 815,
+    "clicks": 82,
+    "views": 1234
+  }
+}
+` + "```" + `
 
 ---
 `
