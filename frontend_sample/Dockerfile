@@ -17,27 +17,25 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV CMS_API_BASE_URL=https://news-api.zachlatta.com
 ENV NEXT_PUBLIC_CMS_API_BASE_URL=https://news-api.zachlatta.com
 
-# Create a script to wait for CMS health check
-RUN echo '#!/bin/sh\n\
-set -e\n\
-echo "Waiting for CMS to be ready..."\n\
-max_attempts=60\n\
-attempt=1\n\
-while [ $attempt -le $max_attempts ]; do\n\
-  echo "Attempt $attempt/$max_attempts: Checking CMS health..."\n\
-  if wget --spider --timeout=5 --tries=1 "$CMS_API_BASE_URL/healthz" 2>/dev/null; then\n\
-    echo "CMS is ready!"\n\
-    exit 0\n\
-  fi\n\
-  echo "CMS not ready yet, waiting 1 second..."\n\
-  sleep 1\n\
-  attempt=$((attempt + 1))\n\
-done\n\
-echo "ERROR: CMS did not become ready within 60 seconds"\n\
-exit 1' > /wait-for-cms.sh && chmod +x /wait-for-cms.sh
-
 # Wait for CMS to be ready before building
-RUN /wait-for-cms.sh
+RUN set -e && \
+    echo "Waiting for CMS to be ready..." && \
+    max_attempts=60 && \
+    attempt=1 && \
+    while [ $attempt -le $max_attempts ]; do \
+      echo "Attempt $attempt/$max_attempts: Checking CMS health..." && \
+      if wget --spider --timeout=5 --tries=1 "$CMS_API_BASE_URL/healthz" 2>/dev/null; then \
+        echo "CMS is ready!" && \
+        break; \
+      fi && \
+      echo "CMS not ready yet, waiting 1 second..." && \
+      sleep 1 && \
+      attempt=$((attempt + 1)); \
+    done && \
+    if [ $attempt -gt $max_attempts ]; then \
+      echo "ERROR: CMS did not become ready within 60 seconds" && \
+      exit 1; \
+    fi
 
 RUN pnpm run build
 
