@@ -539,17 +539,67 @@ func (s *Store) GetEmailViewCount(ctx context.Context, emailID string) (int64, e
 	return metricsCount + warehouseCount, nil
 }
 
+// ---------- View Notifier ----------
+
+type ViewNotifier struct {
+	mu          sync.RWMutex
+	subscribers map[string][]chan struct{}
+}
+
+func NewViewNotifier() *ViewNotifier {
+	return &ViewNotifier{
+		subscribers: make(map[string][]chan struct{}),
+	}
+}
+
+func (vn *ViewNotifier) Subscribe(emailID string) chan struct{} {
+	vn.mu.Lock()
+	defer vn.mu.Unlock()
+	ch := make(chan struct{}, 10)
+	vn.subscribers[emailID] = append(vn.subscribers[emailID], ch)
+	return ch
+}
+
+func (vn *ViewNotifier) Unsubscribe(emailID string, ch chan struct{}) {
+	vn.mu.Lock()
+	defer vn.mu.Unlock()
+	subs := vn.subscribers[emailID]
+	for i, sub := range subs {
+		if sub == ch {
+			vn.subscribers[emailID] = append(subs[:i], subs[i+1:]...)
+			close(ch)
+			break
+		}
+	}
+	if len(vn.subscribers[emailID]) == 0 {
+		delete(vn.subscribers, emailID)
+	}
+}
+
+func (vn *ViewNotifier) Notify(emailID string) {
+	vn.mu.RLock()
+	defer vn.mu.RUnlock()
+	for _, ch := range vn.subscribers[emailID] {
+		select {
+		case ch <- struct{}{}:
+		default:
+		}
+	}
+}
+
 // ---------- HTTP Handlers ----------
 
 type Server struct {
-	store *Store
-	cache *TTLCache
+	store        *Store
+	cache        *TTLCache
+	viewNotifier *ViewNotifier
 }
 
 func NewServer(store *Store) *Server {
 	return &Server{
-		store: store,
-		cache: NewTTLCache(30*time.Second, 512),
+		store:        store,
+		cache:        NewTTLCache(30*time.Second, 512),
+		viewNotifier: NewViewNotifier(),
 	}
 }
 
@@ -661,6 +711,8 @@ func (s *Server) handleEmailView(w http.ResponseWriter, r *http.Request) {
 
 	if err := s.store.TrackEmailView(r.Context(), cookie.Value, emailID); err != nil {
 		log.Printf("track view error: %v", err)
+	} else {
+		s.viewNotifier.Notify(emailID)
 	}
 
 	viewCount, err := s.store.GetEmailViewCount(r.Context(), emailID)
@@ -671,6 +723,58 @@ func (s *Server) handleEmailView(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	_ = json.NewEncoder(w).Encode(map[string]int64{"views": viewCount})
+}
+
+func (s *Server) handleEmailViewsStream(w http.ResponseWriter, r *http.Request) {
+	emailID := chi.URLParam(r, "id")
+	if emailID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	notifyCh := s.viewNotifier.Subscribe(emailID)
+	defer s.viewNotifier.Unsubscribe(emailID, notifyCh)
+
+	throttle := time.NewTicker(333 * time.Millisecond)
+	defer throttle.Stop()
+
+	sendUpdate := func() {
+		viewCount, err := s.store.GetEmailViewCount(r.Context(), emailID)
+		if err != nil {
+			log.Printf("stream view count error: %v", err)
+			return
+		}
+		fmt.Fprintf(w, "data: %d\n\n", viewCount)
+		flusher.Flush()
+	}
+
+	sendUpdate()
+
+	var pending bool
+	for {
+		select {
+		case <-notifyCh:
+			pending = true
+		case <-throttle.C:
+			if pending {
+				sendUpdate()
+				pending = false
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 func (s *Server) handleMailingListsEmails(w http.ResponseWriter, r *http.Request) {
@@ -796,6 +900,7 @@ func main() {
 	r.Get("/mailing_lists", srv.handleMailingLists)
 	r.Get("/emails", srv.handleEmails)
 	r.Get("/emails/{id}/view", srv.handleEmailView)
+	r.Get("/emails/{id}/views/stream", srv.handleEmailViewsStream)
 	r.Get("/mailing_lists/emails", srv.handleMailingListsEmails)
 
 	addr := env("HOST", "127.0.0.1") + ":" + env("PORT", "8080")
@@ -1017,6 +1122,36 @@ The server sets ` + "`_track`" + ` cookie automatically:
 - ` + "`HttpOnly`" + `, ` + "`SameSite=Lax`" + `, ` + "`Secure`" + ` (on HTTPS)
 - ` + "`Max-Age: 2592000`" + ` (30 days)
 - Path: ` + "`/`" + `
+
+---
+
+## GET /emails/{id}/views/stream
+
+Real-time Server-Sent Events (SSE) stream of view count updates.
+
+### Behavior
+- Streams view count updates whenever new views are tracked
+- Throttled to max 3 updates/second to prevent flooding
+- Auto-closes when client disconnects
+
+### Response Format
+` + "```" + `
+data: 1234
+
+data: 1235
+
+data: 1236
+` + "```" + `
+
+Each message is a simple integer representing the current total view count.
+
+### Frontend Example
+` + "```javascript" + `
+const es = new EventSource('/emails/abc123/views/stream');
+es.onmessage = e => {
+  document.getElementById('views').textContent = e.data;
+};
+` + "```" + `
 
 ### View counts in /emails
 All ` + "`/emails`" + ` endpoints include ` + "`stats.views`" + ` with the combined count from both sources.
