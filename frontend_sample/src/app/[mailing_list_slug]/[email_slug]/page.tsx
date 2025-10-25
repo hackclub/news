@@ -1,8 +1,28 @@
 import Link from 'next/link';
 import { getEmailBySlug, getEmails } from '@/lib/cms';
 import { MailingListBadge } from '@/components/MailingListBadge';
+import { ViewTracker } from '@/components/ViewTracker';
+import { ViewCount } from '@/components/ViewCount';
 import { notFound } from 'next/navigation';
 import { Metadata } from 'next';
+
+// Extract body content from email HTML to prevent hydration issues
+function extractBodyContent(html: string): string {
+  // Try to extract content between <body> tags
+  const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i);
+  if (bodyMatch) {
+    return bodyMatch[1];
+  }
+  
+  // If no body tags found, try to extract content after <head> or return as-is
+  const headEndMatch = html.match(/<\/head>\s*<body[^>]*>([\s\S]*?)<\/body>/i);
+  if (headEndMatch) {
+    return headEndMatch[1];
+  }
+  
+  // Fallback: return the original HTML if we can't parse it
+  return html;
+}
 
 // Force static generation
 export const dynamic = 'force-static';
@@ -114,7 +134,7 @@ export default async function EmailDetailPage({ params }: EmailDetailPageProps) 
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
                   </svg>
-                  <span>{email.stats.opens.toLocaleString()} views</span>
+                  <ViewCount emailId={email.id} initialViews={email.stats.views ?? email.stats.opens} />
                 </div>
 
                 <div className="flex items-center space-x-2">
@@ -129,8 +149,11 @@ export default async function EmailDetailPage({ params }: EmailDetailPageProps) 
         </header>
         
         <main className="prose prose-lg prose-gray max-w-none">
-          <div dangerouslySetInnerHTML={{ __html: email.html }} />
+          <div dangerouslySetInnerHTML={{ __html: extractBodyContent(email.html) }} />
         </main>
+        
+        {/* Track view when someone visits this page */}
+        <ViewTracker emailId={email.id} />
       </div>
     </div>
   );

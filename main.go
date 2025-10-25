@@ -52,7 +52,6 @@ type MailingList struct {
 }
 
 type EmailStats struct {
-	Opens  int64 `json:"opens"`
 	Clicks int64 `json:"clicks"`
 	Views  int64 `json:"views"`
 }
@@ -372,8 +371,8 @@ SELECT
   ml.friendly_name,
   ml.description,
   COALESCE(ml.color_scheme, '#000000'),
-  COALESCE(c.opens, 0)::bigint,
   COALESCE(c.clicks, 0)::bigint,
+  COALESCE(c.opens, 0)::bigint,
   c.ai_publishable_content_html,
   c.ai_publishable_content_markdown,
   c.ai_publishable_slug,
@@ -399,13 +398,13 @@ LIMIT %s OFFSET %s;
 		var e Email
 		var sentAt *time.Time
 		var mlName, mlDesc, mlColor string
-		var opens, clicks int64
+		var clicks, warehouseOpens int64
 		var html, md *string
 		var aiSlug, excerpt *string
 		if err := rows.Scan(
 			&e.ID, &e.Subject, &sentAt, &e.MailingListID,
 			&mlName, &mlDesc, &mlColor,
-			&opens, &clicks,
+			&clicks, &warehouseOpens,
 			&html, &md, &aiSlug, &excerpt,
 		); err != nil {
 			return nil, nil, err
@@ -419,12 +418,11 @@ LIMIT %s OFFSET %s;
 			Color:       mlColor,
 		}
 		
-		totalViews, _ := s.GetEmailViewCount(ctx, e.ID)
+		metricsViews, _ := s.GetMetricsViewCount(ctx, e.ID)
 		
 		e.Stats = EmailStats{
-			Opens:  opens,
 			Clicks: clicks,
-			Views:  totalViews,
+			Views:  warehouseOpens + metricsViews,
 		}
 		e.HTML = html
 		e.Markdown = md
@@ -520,23 +518,21 @@ func (s *Store) GetMetricsViewCount(ctx context.Context, emailID string) (int64,
 func (s *Store) GetEmailViewCount(ctx context.Context, emailID string) (int64, error) {
 	metricsCount, _ := s.GetMetricsViewCount(ctx, emailID)
 	
-	var warehouseCount int64
+	var warehouseOpens int64
 	err := s.pool.QueryRow(ctx, `
-		SELECT COALESCE(SUM(unique_count), 0)
-		FROM loops.analytics_events
-		WHERE entity_type = 'campaign'
-		AND entity_id = $1
-		AND event_type = 'viewed'
-	`, emailID).Scan(&warehouseCount)
+		SELECT COALESCE(opens, 0)
+		FROM loops.campaigns
+		WHERE id = $1
+	`, emailID).Scan(&warehouseOpens)
 	
 	if err != nil {
 		if !strings.Contains(err.Error(), "does not exist") && err.Error() != "no rows in result set" {
-			log.Printf("warehouse view count error: %v", err)
+			log.Printf("warehouse opens error: %v", err)
 		}
-		warehouseCount = 0
+		warehouseOpens = 0
 	}
 	
-	return metricsCount + warehouseCount, nil
+	return metricsCount + warehouseOpens, nil
 }
 
 // ---------- View Notifier ----------
@@ -885,6 +881,14 @@ func main() {
 		}
 	}
 
+	var allowedOrigins []string
+	if originsStr := os.Getenv("CORS_ALLOWED_ORIGINS"); originsStr != "" {
+		for _, origin := range strings.Split(originsStr, ",") {
+			allowedOrigins = append(allowedOrigins, strings.TrimSpace(origin))
+		}
+		log.Printf("CORS allowed origins: %v", allowedOrigins)
+	}
+
 	r := chi.NewRouter()
 	r.Use(trustProxyRealIP(trustedCIDRs))
 	r.Use(middleware.RealIP)
@@ -893,6 +897,9 @@ func main() {
 	r.Use(middleware.Heartbeat("/healthz"))
 	r.Use(middleware.Timeout(30 * time.Second))
 	r.Use(httprate.LimitByIP(100, 1*time.Minute))
+	if len(allowedOrigins) > 0 {
+		r.Use(corsMiddleware(allowedOrigins))
+	}
 	r.Use(securityHeaders())
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/docs", http.StatusFound) })
@@ -926,6 +933,34 @@ func trustProxyRealIP(trustedCIDRs []*net.IPNet) func(http.Handler) http.Handler
 				r.Header.Del("X-Forwarded-For")
 				r.Header.Del("X-Real-IP")
 			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
+func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			origin := r.Header.Get("Origin")
+			
+			if origin != "" && len(allowedOrigins) > 0 {
+				for _, allowed := range allowedOrigins {
+					if origin == allowed || allowed == "*" {
+						w.Header().Set("Access-Control-Allow-Origin", origin)
+						w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+						w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+						w.Header().Set("Access-Control-Allow-Credentials", "true")
+						w.Header().Set("Access-Control-Max-Age", "86400")
+						break
+					}
+				}
+			}
+			
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			
 			next.ServeHTTP(w, r)
 		})
 	}
@@ -1029,7 +1064,6 @@ List **sent** emails. Returns content + stats and a compact reference to the mai
         "color": "#ec3750"
       },
       "stats": {
-        "opens": 815,
         "clicks": 82,
         "views": 1234
       },
@@ -1044,7 +1078,8 @@ List **sent** emails. Returns content + stats and a compact reference to the mai
 ` + "```" + `
 
 **Notes**
-- ` + "`stats.views`" + ` combines real-time TimescaleDB tracking + warehouse analytics.
+- ` + "`stats.views`" + ` = real-time TimescaleDB views + warehouse opens (email opens from Loops).
+- ` + "`stats.clicks`" + ` = email link clicks from warehouse.
 - We do **not** expose ` + "`from_email`" + `, ` + "`reply_to_email`" + `, or any per-recipient stats.
 
 ---
@@ -1160,7 +1195,6 @@ All ` + "`/emails`" + ` endpoints include ` + "`stats.views`" + ` with the combi
 ` + "```json" + `
 {
   "stats": {
-    "opens": 815,
     "clicks": 82,
     "views": 1234
   }
