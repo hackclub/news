@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/go-chi/httprate"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 )
@@ -151,7 +153,17 @@ func (c *TTLCache) Set(key string, val []byte) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.store) >= c.max {
-		c.store = make(map[string]cacheItem)
+		var oldestKey string
+		oldestTime := time.Now()
+		for k, v := range c.store {
+			if v.expiresAt.Before(oldestTime) {
+				oldestTime = v.expiresAt
+				oldestKey = k
+			}
+		}
+		if oldestKey != "" {
+			delete(c.store, oldestKey)
+		}
 	}
 	etag := weakETag(val)
 	c.store[key] = cacheItem{val: val, etag: etag, expiresAt: time.Now().Add(c.ttl)}
@@ -169,6 +181,13 @@ type Store struct {
 }
 
 func NewStore(ctx context.Context, url string) (*Store, error) {
+	if os.Getenv("ALLOW_DB_INSECURE") != "1" && !strings.Contains(url, "sslmode=") {
+		sep := "?"
+		if strings.Contains(url, "?") {
+			sep = "&"
+		}
+		url += sep + "sslmode=require"
+	}
 	cfg, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		return nil, err
@@ -357,7 +376,10 @@ LIMIT %s OFFSET %s;
 	return out, next, rows.Err()
 }
 
+var scriptStyleRegex = regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</(script|style)>`)
+
 func stripTags(s string) string {
+	s = scriptStyleRegex.ReplaceAllString(s, "")
 	var b strings.Builder
 	inTag := false
 	for _, r := range s {
@@ -522,20 +544,23 @@ type apiErr struct {
 }
 
 func httpError(w http.ResponseWriter, err error) {
-	var status = http.StatusInternalServerError
-	msg := http.StatusText(status)
-	if errors.Is(err, context.DeadlineExceeded) {
+	status := http.StatusInternalServerError
+	public := "internal server error"
+
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
 		status = http.StatusGatewayTimeout
-		msg = "upstream timed out"
-	} else if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+		public = "upstream timed out"
+	case func() bool { nerr, ok := err.(net.Error); return ok && nerr.Timeout() }():
 		status = http.StatusGatewayTimeout
-		msg = "network timeout"
-	} else if err != nil {
-		msg = err.Error()
+		public = "network timeout"
 	}
+
+	log.Printf("error: %v", err)
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(apiErr{Message: msg})
+	_ = json.NewEncoder(w).Encode(apiErr{Message: public})
 }
 
 // ---------- Main ----------
@@ -557,12 +582,26 @@ func main() {
 
 	srv := NewServer(store)
 
+	var trustedCIDRs []*net.IPNet
+	if cidrStr := os.Getenv("TRUSTED_PROXY_CIDRS"); cidrStr != "" {
+		for _, cidr := range strings.Split(cidrStr, ",") {
+			_, n, err := net.ParseCIDR(strings.TrimSpace(cidr))
+			if err != nil {
+				log.Printf("warning: invalid CIDR %q: %v", cidr, err)
+				continue
+			}
+			trustedCIDRs = append(trustedCIDRs, n)
+		}
+	}
+
 	r := chi.NewRouter()
+	r.Use(trustProxyRealIP(trustedCIDRs))
 	r.Use(middleware.RealIP)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Heartbeat("/healthz"))
 	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(httprate.LimitByIP(100, 1*time.Minute))
 	r.Use(securityHeaders())
 
 	r.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/docs", http.StatusFound) })
@@ -571,10 +610,31 @@ func main() {
 	r.Get("/emails", srv.handleEmails)
 	r.Get("/mailing_lists/emails", srv.handleMailingListsEmails)
 
-	addr := ":" + env("PORT", "8080")
+	addr := env("HOST", "127.0.0.1") + ":" + env("PORT", "8080")
 	log.Printf("listening on %s", addr)
 	if err := http.ListenAndServe(addr, r); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
+	}
+}
+
+func trustProxyRealIP(trustedCIDRs []*net.IPNet) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			host, _, _ := net.SplitHostPort(r.RemoteAddr)
+			ip := net.ParseIP(host)
+			trusted := false
+			for _, n := range trustedCIDRs {
+				if n.Contains(ip) {
+					trusted = true
+					break
+				}
+			}
+			if !trusted {
+				r.Header.Del("X-Forwarded-For")
+				r.Header.Del("X-Real-IP")
+			}
+			next.ServeHTTP(w, r)
+		})
 	}
 }
 
@@ -584,7 +644,10 @@ func securityHeaders() func(http.Handler) http.Handler {
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("X-Frame-Options", "DENY")
 			w.Header().Set("Referrer-Policy", "no-referrer")
-			w.Header().Set("Content-Security-Policy", "default-src 'none'; img-src * data:; style-src 'unsafe-inline';")
+			w.Header().Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none';")
+			if os.Getenv("ENABLE_HSTS") == "1" {
+				w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
+			}
 			next.ServeHTTP(w, r)
 		})
 	}
