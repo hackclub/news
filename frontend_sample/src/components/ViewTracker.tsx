@@ -2,12 +2,14 @@
 
 import { useEffect } from 'react';
 
+const CMS_BASE_URL = process.env.NEXT_PUBLIC_CMS_API_BASE_URL || 'http://localhost:8080';
+
 export function ViewTracker({ emailId }: { emailId: string }) {
   useEffect(() => {
     // Only track the view - no SSE streaming
     async function trackView() {
       try {
-        await fetch(`http://localhost:8080/emails/${emailId}/view`, {
+        await fetch(`${CMS_BASE_URL}/emails/${emailId}/view`, {
           credentials: 'include',
         });
       } catch (err) {

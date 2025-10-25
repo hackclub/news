@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 
+const CMS_BASE_URL = process.env.NEXT_PUBLIC_CMS_API_BASE_URL || 'http://localhost:8080';
+
 export function ViewCount({ emailId, initialViews }: { emailId: string; initialViews: number }) {
   const [views, setViews] = useState<number>(initialViews);
   const [error, setError] = useState(false);
@@ -17,7 +19,7 @@ export function ViewCount({ emailId, initialViews }: { emailId: string; initialV
     let eventSource: EventSource | null = null;
     
     try {
-      eventSource = new EventSource(`http://localhost:8080/emails/${emailId}/views/stream`);
+      eventSource = new EventSource(`${CMS_BASE_URL}/emails/${emailId}/views/stream`);
       
       eventSource.onopen = () => {
         console.log(`EventSource opened for email ${emailId}`);
