@@ -1,7 +1,20 @@
 import Link from 'next/link';
-import { getMailingListBySlug, getEmailsForMailingList } from '@/lib/cms';
+import { getMailingListBySlug, getEmailsForMailingList, getAllMailingLists } from '@/lib/cms';
 import { EmailCard } from '@/components/EmailCard';
 import { notFound } from 'next/navigation';
+
+// Force static generation
+export const dynamic = 'force-static';
+export const revalidate = false;
+
+// Generate static params for all mailing lists
+export async function generateStaticParams() {
+  const mailingLists = await getAllMailingLists();
+  
+  return mailingLists.map((mailingList) => ({
+    mailing_list_slug: mailingList.slug,
+  }));
+}
 
 interface MailingListPageProps {
   params: Promise<{

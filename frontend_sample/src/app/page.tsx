@@ -1,6 +1,10 @@
 import { getEmails, getAllMailingLists } from '@/lib/cms';
 import { HomePageClient } from '@/components/HomePageClient';
 
+// Force static generation
+export const dynamic = 'force-static';
+export const revalidate = false;
+
 export default async function Home() {
   const emailsResponse = await getEmails(50, 0);
   const emails = emailsResponse.items;

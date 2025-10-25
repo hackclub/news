@@ -1,8 +1,23 @@
 import Link from 'next/link';
-import { getEmailBySlug } from '@/lib/cms';
+import { getEmailBySlug, getEmails } from '@/lib/cms';
 import { MailingListBadge } from '@/components/MailingListBadge';
 import { notFound } from 'next/navigation';
 import { Metadata } from 'next';
+
+// Force static generation
+export const dynamic = 'force-static';
+export const revalidate = false;
+
+// Generate static params for all emails
+export async function generateStaticParams() {
+  const emailsResponse = await getEmails(1000, 0); // Get all emails for static generation
+  const emails = emailsResponse.items;
+  
+  return emails.map((email) => ({
+    mailing_list_slug: email.mailing_list.slug,
+    email_slug: email.slug,
+  }));
+}
 
 interface EmailDetailPageProps {
   params: Promise<{
