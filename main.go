@@ -59,6 +59,7 @@ type Email struct {
 	ID             string     `json:"id"`
 	Slug           string     `json:"slug"` // derived from subject or name
 	Subject        string     `json:"subject"`
+	Excerpt        *string    `json:"excerpt,omitempty"`
 	SentAt         *time.Time `json:"sent_at,omitempty"`
 	MailingListID  string     `json:"mailing_list_id"`
 	MailingListRef ListRef    `json:"mailing_list"`
@@ -234,7 +235,7 @@ SELECT ml.id,
 FROM loops.mailing_lists ml
 LEFT JOIN sub_counts sc ON sc.mailing_list_id = ml.id
 LEFT JOIN sent_counts se ON se.mailing_list_id = ml.id
-WHERE COALESCE(sc.subscriber_count, 0) > 0 AND COALESCE(se.sent_email_count, 0) > 0
+WHERE COALESCE(se.sent_email_count, 0) > 0
 ORDER BY (se.last_sent_at IS NULL) ASC, se.last_sent_at DESC NULLS LAST, ml.friendly_name ASC
 LIMIT $1 OFFSET $2;
 `
@@ -296,7 +297,8 @@ SELECT
   COALESCE(c.clicks, 0)::bigint,
   c.ai_publishable_content_html,
   c.ai_publishable_content_markdown,
-  c.ai_publishable_slug
+  c.ai_publishable_slug,
+  c.ai_publishable_response_json->>'excerpt'
 FROM loops.campaigns c
 JOIN loops.mailing_lists ml ON ml.id = c.mailing_list_id
 %s
@@ -320,12 +322,12 @@ LIMIT %s OFFSET %s;
 		var mlName, mlDesc, mlColor string
 		var opens, clicks int64
 		var html, md *string
-		var aiSlug *string
+		var aiSlug, excerpt *string
 		if err := rows.Scan(
 			&e.ID, &e.Subject, &sentAt, &e.MailingListID,
 			&mlName, &mlDesc, &mlColor,
 			&opens, &clicks,
-			&html, &md, &aiSlug,
+			&html, &md, &aiSlug, &excerpt,
 		); err != nil {
 			return nil, nil, err
 		}
@@ -343,6 +345,7 @@ LIMIT %s OFFSET %s;
 		}
 		e.HTML = html
 		e.Markdown = md
+		e.Excerpt = excerpt
 		if aiSlug != nil && *aiSlug != "" {
 			e.Slug = *aiSlug
 		} else {
