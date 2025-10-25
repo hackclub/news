@@ -902,7 +902,7 @@ func main() {
 	r.Use(securityHeaders())
 
 	r.Group(func(r chi.Router) {
-		r.Use(httprate.LimitByIP(100, 1*time.Minute))
+		r.Use(httprate.LimitByIP(15, 1*time.Second))
 		r.Get("/", func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, "/docs", http.StatusFound) })
 		r.Get("/docs", srv.handleDocs)
 		r.Get("/mailing_lists", srv.handleMailingLists)
@@ -912,7 +912,7 @@ func main() {
 	})
 
 	r.Group(func(r chi.Router) {
-		r.Use(httprate.LimitByIP(1000, 1*time.Minute))
+		r.Use(httprate.LimitByIP(100, 1*time.Second))
 		r.Get("/emails/{id}/views/stream", srv.handleEmailViewsStream)
 	})
 
