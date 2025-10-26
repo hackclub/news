@@ -365,7 +365,7 @@ func (s *Store) ListEmails(ctx context.Context, mailingListID *string, limit, of
 	q := fmt.Sprintf(`
 SELECT
   c.id,
-  c.subject,
+  COALESCE(c.ai_publishable_response_json->>'title', c.subject),
   c.sent_at,
   c.mailing_list_id,
   ml.friendly_name,
