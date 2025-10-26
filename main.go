@@ -372,7 +372,7 @@ LIMIT $1 OFFSET $2;
 	return out, next, rows.Err()
 }
 
-func (s *Store) ListEmails(ctx context.Context, mailingListID *string, limit, offset int) ([]Email, *int, error) {
+func (s *Store) ListEmails(ctx context.Context, r *http.Request, mailingListID *string, limit, offset int) ([]Email, *int, error) {
 	args := []any{}
 	where := "WHERE c.status = 'Sent' AND c.mailing_list_id IS NOT NULL AND c.ai_publishable = true"
 	if mailingListID != nil && *mailingListID != "" {
@@ -445,7 +445,7 @@ LIMIT %s OFFSET %s;
 		}
 		
 		if html != nil && *html != "" {
-			rewritten, err := rewriteEmailLinks(e.ID, *html)
+			rewritten, err := rewriteEmailLinks(r, e.ID, *html)
 			if err == nil {
 				e.HTML = &rewritten
 			} else {
@@ -491,11 +491,27 @@ LIMIT %s OFFSET %s;
 
 var scriptStyleRegex = regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</(script|style)>`)
 
-func rewriteEmailLinks(emailID string, html string) (string, error) {
+func rewriteEmailLinks(r *http.Request, emailID string, html string) (string, error) {
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
 	if err != nil {
 		return html, err
 	}
+	
+	// Determine scheme (http or https)
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	// Check X-Forwarded-Proto header (for reverse proxies)
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+	
+	// Get host from request
+	host := r.Host
+	
+	// Build base URL
+	baseURL := fmt.Sprintf("%s://%s", scheme, host)
 	
 	linkIndex := 0
 	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
@@ -508,7 +524,7 @@ func rewriteEmailLinks(emailID string, html string) (string, error) {
 			return
 		}
 		
-		newURL := fmt.Sprintf("/emails/%s/click/%d?url=%s", emailID, linkIndex, url.QueryEscape(href))
+		newURL := fmt.Sprintf("%s/emails/%s/click/%d?url=%s", baseURL, emailID, linkIndex, url.QueryEscape(href))
 		s.SetAttr("href", newURL)
 		linkIndex++
 	})
@@ -674,12 +690,73 @@ func (vn *ViewNotifier) Notify(emailID string) {
 	}
 }
 
+// ---------- Click Tracker Rate Limiter ----------
+
+type ClickTracker struct {
+	mu       sync.RWMutex
+	clicks   map[string]time.Time // key: IP address
+	cleanupC chan struct{}
+}
+
+func NewClickTracker() *ClickTracker {
+	ct := &ClickTracker{
+		clicks:   make(map[string]time.Time),
+		cleanupC: make(chan struct{}),
+	}
+	
+	// Cleanup old entries every minute
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				ct.cleanup()
+			case <-ct.cleanupC:
+				return
+			}
+		}
+	}()
+	
+	return ct
+}
+
+func (ct *ClickTracker) cleanup() {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	
+	cutoff := time.Now().Add(-1 * time.Minute)
+	for ip, lastClick := range ct.clicks {
+		if lastClick.Before(cutoff) {
+			delete(ct.clicks, ip)
+		}
+	}
+}
+
+// ShouldTrack returns true if this IP should be tracked (max 10 clicks/second)
+func (ct *ClickTracker) ShouldTrack(ip string) bool {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	
+	now := time.Now()
+	lastClick, exists := ct.clicks[ip]
+	
+	// Allow if never seen or last click was >100ms ago (10/sec max)
+	if !exists || now.Sub(lastClick) > 100*time.Millisecond {
+		ct.clicks[ip] = now
+		return true
+	}
+	
+	return false
+}
+
 // ---------- HTTP Handlers ----------
 
 type Server struct {
 	store        *Store
 	cache        *TTLCache
 	viewNotifier *ViewNotifier
+	clickTracker *ClickTracker
 }
 
 func NewServer(store *Store) *Server {
@@ -687,6 +764,7 @@ func NewServer(store *Store) *Server {
 		store:        store,
 		cache:        NewTTLCache(30*time.Second, 512),
 		viewNotifier: NewViewNotifier(),
+		clickTracker: NewClickTracker(),
 	}
 }
 
@@ -760,7 +838,7 @@ func (s *Server) handleEmails(w http.ResponseWriter, r *http.Request) {
 		mlid = &v
 	}
 	s.jsonCached(w, r, func() (any, error) {
-		emails, next, err := s.store.ListEmails(r.Context(), mlid, limit, offset)
+		emails, next, err := s.store.ListEmails(r.Context(), r, mlid, limit, offset)
 		if err != nil {
 			return nil, err
 		}
@@ -833,14 +911,21 @@ func (s *Server) handleLinkClick(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
+	// Always get/set session cookie
 	cookie := getOrCreateSession(w, r)
 	
-	if err := s.store.TrackLinkClick(r.Context(), cookie.Value, emailID, targetURL, linkIndex); err != nil {
-		log.Printf("track click error: %v", err)
-	} else {
-		s.viewNotifier.Notify(emailID)
+	// Rate limit tracking (not redirect) - max 10 clicks/sec per IP
+	clientIP := r.RemoteAddr
+	if shouldTrack := s.clickTracker.ShouldTrack(clientIP); shouldTrack {
+		if err := s.store.TrackLinkClick(r.Context(), cookie.Value, emailID, targetURL, linkIndex); err != nil {
+			log.Printf("track click error: %v", err)
+		} else {
+			s.viewNotifier.Notify(emailID)
+		}
 	}
+	// If rate limited, we skip tracking but still redirect
 	
+	// ALWAYS redirect regardless of tracking
 	http.Redirect(w, r, targetURL, http.StatusFound)
 }
 
@@ -927,7 +1012,7 @@ func (s *Server) handleMailingListsEmails(w http.ResponseWriter, r *http.Request
 		out := make([]GroupedEmails, 0, len(lists))
 		for _, ml := range lists {
 			mlid := ml.ID
-			emails, _, err := s.store.ListEmails(r.Context(), &mlid, limitPerList, 0)
+			emails, _, err := s.store.ListEmails(r.Context(), r, &mlid, limitPerList, 0)
 			if err != nil {
 				return nil, err
 			}
@@ -1046,7 +1131,6 @@ func main() {
 		r.Get("/mailing_lists", srv.handleMailingLists)
 		r.Get("/emails", srv.handleEmails)
 		r.Get("/emails/{id}/view", srv.handleEmailView)
-		r.Get("/emails/{id}/click/{index}", srv.handleLinkClick)
 		r.Get("/mailing_lists/emails", srv.handleMailingListsEmails)
 	})
 
@@ -1054,6 +1138,9 @@ func main() {
 		r.Use(httprate.LimitByIP(100, 1*time.Second))
 		r.Get("/emails/{id}/stats/stream", srv.handleEmailStatsStream)
 	})
+
+	// Link clicks: ALWAYS redirect, but rate limit tracking
+	r.Get("/emails/{id}/click/{index}", srv.handleLinkClick)
 
 	addr := env("HOST", "127.0.0.1") + ":" + env("PORT", "8080")
 	log.Printf("listening on %s", addr)
