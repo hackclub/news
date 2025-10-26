@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strconv"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/PuerkitoBio/goquery"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/httprate"
@@ -275,6 +277,21 @@ func (s *Store) RunMetricsMigrations(ctx context.Context) error {
 			if_not_exists => TRUE)`,
 		
 		`CREATE INDEX IF NOT EXISTS idx_email_views_email_id ON email_views(email_id, time DESC)`,
+		
+		`CREATE TABLE IF NOT EXISTS email_link_clicks (
+			time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+			session_id TEXT NOT NULL,
+			email_id TEXT NOT NULL,
+			link_url TEXT NOT NULL,
+			link_index INT NOT NULL
+		)`,
+		
+		`SELECT create_hypertable('email_link_clicks', 'time', if_not_exists => TRUE)`,
+		
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_email_link_clicks_dedup 
+		ON email_link_clicks (session_id, email_id, link_index, time_bucket('5 minutes', time), time)`,
+		
+		`CREATE INDEX IF NOT EXISTS idx_email_link_clicks_email_id ON email_link_clicks(email_id, time DESC)`,
 	}
 
 	for i, migration := range migrations {
@@ -365,7 +382,7 @@ func (s *Store) ListEmails(ctx context.Context, mailingListID *string, limit, of
 	q := fmt.Sprintf(`
 SELECT
   c.id,
-  COALESCE(c.ai_publishable_response_json->>'title', c.subject),
+  c.ai_publishable_response_json->>'title',
   c.sent_at,
   c.mailing_list_id,
   ml.friendly_name,
@@ -420,11 +437,23 @@ LIMIT %s OFFSET %s;
 		
 		metricsViews, _ := s.GetMetricsViewCount(ctx, e.ID)
 		
+		metricsClicks, _ := s.GetMetricsClickCount(ctx, e.ID)
+		
 		e.Stats = EmailStats{
-			Clicks: clicks,
+			Clicks: clicks + metricsClicks,
 			Views:  warehouseOpens + metricsViews,
 		}
-		e.HTML = html
+		
+		if html != nil && *html != "" {
+			rewritten, err := rewriteEmailLinks(e.ID, *html)
+			if err == nil {
+				e.HTML = &rewritten
+			} else {
+				e.HTML = html
+			}
+		} else {
+			e.HTML = html
+		}
 		e.Markdown = md
 		e.Excerpt = excerpt
 		if aiSlug != nil && *aiSlug != "" {
@@ -462,6 +491,35 @@ LIMIT %s OFFSET %s;
 
 var scriptStyleRegex = regexp.MustCompile(`(?is)<(script|style)[^>]*>.*?</(script|style)>`)
 
+func rewriteEmailLinks(emailID string, html string) (string, error) {
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+	if err != nil {
+		return html, err
+	}
+	
+	linkIndex := 0
+	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
+		href, exists := s.Attr("href")
+		if !exists {
+			return
+		}
+		
+		if strings.HasPrefix(href, "mailto:") || strings.HasPrefix(href, "#") || strings.HasPrefix(href, "tel:") {
+			return
+		}
+		
+		newURL := fmt.Sprintf("/emails/%s/click/%d?url=%s", emailID, linkIndex, url.QueryEscape(href))
+		s.SetAttr("href", newURL)
+		linkIndex++
+	})
+	
+	rewritten, err := doc.Html()
+	if err != nil {
+		return html, err
+	}
+	return rewritten, nil
+}
+
 func stripTags(s string) string {
 	s = scriptStyleRegex.ReplaceAllString(s, "")
 	var b strings.Builder
@@ -496,6 +554,20 @@ func (s *Store) TrackEmailView(ctx context.Context, sessionID, emailID string) e
 	return err
 }
 
+func (s *Store) TrackLinkClick(ctx context.Context, sessionID, emailID, linkURL string, linkIndex int) error {
+	if s.metricsPool == nil {
+		return nil
+	}
+	
+	_, err := s.metricsPool.Exec(ctx, `
+		INSERT INTO email_link_clicks (session_id, email_id, link_url, link_index)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT DO NOTHING
+	`, sessionID, emailID, linkURL, linkIndex)
+	
+	return err
+}
+
 func (s *Store) GetMetricsViewCount(ctx context.Context, emailID string) (int64, error) {
 	if s.metricsPool == nil {
 		return 0, nil
@@ -505,6 +577,25 @@ func (s *Store) GetMetricsViewCount(ctx context.Context, emailID string) (int64,
 	err := s.metricsPool.QueryRow(ctx, `
 		SELECT COUNT(DISTINCT session_id)
 		FROM email_views
+		WHERE email_id = $1
+	`, emailID).Scan(&count)
+	
+	if err != nil && err.Error() != "no rows in result set" {
+		return 0, nil
+	}
+	
+	return count, nil
+}
+
+func (s *Store) GetMetricsClickCount(ctx context.Context, emailID string) (int64, error) {
+	if s.metricsPool == nil {
+		return 0, nil
+	}
+	
+	var count int64
+	err := s.metricsPool.QueryRow(ctx, `
+		SELECT COUNT(DISTINCT (session_id, link_index))
+		FROM email_link_clicks
 		WHERE email_id = $1
 	`, emailID).Scan(&count)
 	
@@ -682,14 +773,7 @@ type GroupedEmails struct {
 	Emails      []Email     `json:"emails"`
 }
 
-func (s *Server) handleEmailView(w http.ResponseWriter, r *http.Request) {
-	emailID := chi.URLParam(r, "id")
-	if emailID == "" {
-		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(apiErr{Message: "missing email id"})
-		return
-	}
-
+func getOrCreateSession(w http.ResponseWriter, r *http.Request) *http.Cookie {
 	cookie, err := r.Cookie("_track")
 	if err != nil {
 		sessionID := generateSessionID()
@@ -704,6 +788,18 @@ func (s *Server) handleEmailView(w http.ResponseWriter, r *http.Request) {
 		}
 		http.SetCookie(w, cookie)
 	}
+	return cookie
+}
+
+func (s *Server) handleEmailView(w http.ResponseWriter, r *http.Request) {
+	emailID := chi.URLParam(r, "id")
+	if emailID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(apiErr{Message: "missing email id"})
+		return
+	}
+
+	cookie := getOrCreateSession(w, r)
 
 	if err := s.store.TrackEmailView(r.Context(), cookie.Value, emailID); err != nil {
 		log.Printf("track view error: %v", err)
@@ -721,7 +817,34 @@ func (s *Server) handleEmailView(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]int64{"views": viewCount})
 }
 
-func (s *Server) handleEmailViewsStream(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleLinkClick(w http.ResponseWriter, r *http.Request) {
+	emailID := chi.URLParam(r, "id")
+	linkIndexStr := chi.URLParam(r, "index")
+	targetURL := r.URL.Query().Get("url")
+	
+	if emailID == "" || linkIndexStr == "" || targetURL == "" {
+		http.Error(w, "missing parameters", http.StatusBadRequest)
+		return
+	}
+	
+	linkIndex, err := strconv.Atoi(linkIndexStr)
+	if err != nil {
+		http.Error(w, "invalid link index", http.StatusBadRequest)
+		return
+	}
+	
+	cookie := getOrCreateSession(w, r)
+	
+	if err := s.store.TrackLinkClick(r.Context(), cookie.Value, emailID, targetURL, linkIndex); err != nil {
+		log.Printf("track click error: %v", err)
+	} else {
+		s.viewNotifier.Notify(emailID)
+	}
+	
+	http.Redirect(w, r, targetURL, http.StatusFound)
+}
+
+func (s *Server) handleEmailStatsStream(w http.ResponseWriter, r *http.Request) {
 	emailID := chi.URLParam(r, "id")
 	if emailID == "" {
 		w.WriteHeader(http.StatusBadRequest)
@@ -751,7 +874,22 @@ func (s *Server) handleEmailViewsStream(w http.ResponseWriter, r *http.Request) 
 			log.Printf("stream view count error: %v", err)
 			return
 		}
-		fmt.Fprintf(w, "data: %d\n\n", viewCount)
+		
+		metricsClicks, _ := s.store.GetMetricsClickCount(r.Context(), emailID)
+		var warehouseClicks int64
+		_ = s.store.pool.QueryRow(r.Context(), `
+			SELECT COALESCE(clicks, 0)
+			FROM loops.campaigns
+			WHERE id = $1
+		`, emailID).Scan(&warehouseClicks)
+		clickCount := metricsClicks + warehouseClicks
+		
+		stats := map[string]int64{
+			"views":  viewCount,
+			"clicks": clickCount,
+		}
+		data, _ := json.Marshal(stats)
+		fmt.Fprintf(w, "data: %s\n\n", data)
 		flusher.Flush()
 	}
 
@@ -908,12 +1046,13 @@ func main() {
 		r.Get("/mailing_lists", srv.handleMailingLists)
 		r.Get("/emails", srv.handleEmails)
 		r.Get("/emails/{id}/view", srv.handleEmailView)
+		r.Get("/emails/{id}/click/{index}", srv.handleLinkClick)
 		r.Get("/mailing_lists/emails", srv.handleMailingListsEmails)
 	})
 
 	r.Group(func(r chi.Router) {
 		r.Use(httprate.LimitByIP(100, 1*time.Second))
-		r.Get("/emails/{id}/views/stream", srv.handleEmailViewsStream)
+		r.Get("/emails/{id}/stats/stream", srv.handleEmailStatsStream)
 	})
 
 	addr := env("HOST", "127.0.0.1") + ":" + env("PORT", "8080")
@@ -1085,7 +1224,8 @@ List **sent** emails. Returns content + stats and a compact reference to the mai
 
 **Notes**
 - ` + "`stats.views`" + ` = real-time TimescaleDB views + warehouse opens (email opens from Loops).
-- ` + "`stats.clicks`" + ` = email link clicks from warehouse.
+- ` + "`stats.clicks`" + ` = real-time TimescaleDB link clicks + warehouse clicks from Loops.
+- ` + "`html`" + ` field contains **rewritten links** for click tracking (see Link Click Tracking below).
 - We do **not** expose ` + "`from_email`" + `, ` + "`reply_to_email`" + `, or any per-recipient stats.
 
 ---
@@ -1166,46 +1306,111 @@ The server sets ` + "`_track`" + ` cookie automatically:
 
 ---
 
-## GET /emails/{id}/views/stream
+## Link Click Tracking
 
-Real-time Server-Sent Events (SSE) stream of view count updates.
+All links in email HTML are automatically rewritten to track clicks while preserving the user experience.
+
+### How It Works
+
+1. **Automatic Link Rewriting**: When you fetch email HTML from ` + "`/emails`" + `, all ` + "`<a href>`" + ` tags are rewritten:
+   - Original: ` + "`<a href=\"https://example.com\">Click here</a>`" + `
+   - Rewritten: ` + "`<a href=\"/emails/{id}/click/0?url=https%3A%2F%2Fexample.com\">Click here</a>`" + `
+
+2. **Link Indexing**: Each link gets a sequential index (0, 1, 2...) for tracking which specific links are clicked.
+
+3. **Preserved Links**: ` + "`mailto:`" + `, ` + "`tel:`" + `, and ` + "`#`" + ` anchor links are **not** rewritten.
+
+4. **Click Tracking**: When a user clicks a rewritten link:
+   - Session is tracked via ` + "`_track`" + ` cookie (same as view tracking)
+   - Click is recorded in TimescaleDB
+   - User is redirected to the original URL (302 redirect)
+
+5. **Deduplication**: Same session clicking the same link = counted once (per email).
+
+---
+
+## GET /emails/{id}/click/{index}?url={url}
+
+Track a link click and redirect to the original URL.
+
+### Parameters
+- ` + "`id`" + ` - Email ID
+- ` + "`index`" + ` - Link index (0-based, from HTML rewriting)
+- ` + "`url`" + ` - URL-encoded original destination
 
 ### Behavior
-- Streams view count updates whenever new views are tracked
+- Sets ` + "`_track`" + ` cookie if not present (30-day session)
+- Records click in TimescaleDB with deduplication
+- Emits real-time event to SSE subscribers
+- Returns 302 redirect to original URL
+
+### Example
+` + "```" + `
+GET /emails/abc123/click/0?url=https%3A%2F%2Fexample.com
+→ 302 Redirect to https://example.com
+→ Click tracked in database
+→ SSE subscribers notified
+` + "```" + `
+
+---
+
+## GET /emails/{id}/stats/stream
+
+Real-time Server-Sent Events (SSE) stream of **both** view and click count updates.
+
+### Behavior
+- Streams stats updates whenever views OR clicks are tracked
 - Throttled to max 3 updates/second to prevent flooding
 - Auto-closes when client disconnects
+- Sends initial stats immediately on connection
 
 ### Response Format
 ` + "```" + `
-data: 1234
+data: {"views":1234,"clicks":82}
 
-data: 1235
+data: {"views":1235,"clicks":82}
 
-data: 1236
+data: {"views":1235,"clicks":83}
 ` + "```" + `
 
-Each message is a simple integer representing the current total view count.
+Each message is a JSON object with both view and click counts.
 
 ### Frontend Example
 ` + "```javascript" + `
-const es = new EventSource('/emails/abc123/views/stream');
+const es = new EventSource('/emails/abc123/stats/stream');
 es.onmessage = e => {
-  document.getElementById('views').textContent = e.data;
+  const stats = JSON.parse(e.data);
+  document.getElementById('views').textContent = stats.views;
+  document.getElementById('clicks').textContent = stats.clicks;
 };
 ` + "```" + `
 
-### View counts in /emails
-All ` + "`/emails`" + ` endpoints include ` + "`stats.views`" + ` with the combined count from both sources.
+### Update Triggers
+Events are emitted when:
+- A view is tracked (` + "`/emails/{id}/view`" + `)
+- A link click is tracked (` + "`/emails/{id}/click/{index}`" + `)
+- Updates are throttled: rapid events are batched into periodic updates (333ms interval)
 
-**Example**:
-` + "```json" + `
-{
-  "stats": {
-    "clicks": 82,
-    "views": 1234
-  }
-}
-` + "```" + `
+---
+
+## Click Analytics
+
+### Counting Method
+- **Database**: Stores all click events with session_id, email_id, link_index, link_url, timestamp
+- **Deduplication**: Uses ` + "`COUNT(DISTINCT (session_id, link_index))`" + ` to count unique clicks
+- **Combined Total**: TimescaleDB tracked clicks + warehouse clicks from Loops
+
+### Privacy & Session Tracking
+- Same ` + "`_track`" + ` cookie used for both views and clicks
+- Anonymous session IDs only (no PII)
+- HttpOnly, SameSite=Lax, Secure (on HTTPS)
+- 30-day cookie lifetime
+
+### Deduplication Rules
+- Same session + same link = 1 click (counted once)
+- Same session + different links = multiple clicks
+- Different sessions + same link = multiple clicks
+- Multiple clicks within 5-min window stored but counted as one
 
 ---
 `
