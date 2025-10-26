@@ -561,13 +561,32 @@ func (s *Store) TrackEmailView(ctx context.Context, sessionID, emailID string) e
 		return nil
 	}
 	
-	_, err := s.metricsPool.Exec(ctx, `
-		INSERT INTO email_views (session_id, email_id)
-		VALUES ($1, $2)
-		ON CONFLICT DO NOTHING
-	`, sessionID, emailID)
+	// Check if this session already viewed this email in the last 5 minutes
+	var exists bool
+	err := s.metricsPool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM email_views
+			WHERE session_id = $1
+			  AND email_id = $2
+			  AND time > NOW() - INTERVAL '5 minutes'
+			LIMIT 1
+		)
+	`, sessionID, emailID).Scan(&exists)
 	
-	return err
+	if err != nil {
+		return err
+	}
+	
+	// Only insert if not already viewed in last 5 minutes
+	if !exists {
+		_, err = s.metricsPool.Exec(ctx, `
+			INSERT INTO email_views (session_id, email_id)
+			VALUES ($1, $2)
+		`, sessionID, emailID)
+		return err
+	}
+	
+	return nil
 }
 
 func (s *Store) TrackLinkClick(ctx context.Context, sessionID, emailID, linkURL string, linkIndex int) error {
@@ -575,13 +594,33 @@ func (s *Store) TrackLinkClick(ctx context.Context, sessionID, emailID, linkURL 
 		return nil
 	}
 	
-	_, err := s.metricsPool.Exec(ctx, `
-		INSERT INTO email_link_clicks (session_id, email_id, link_url, link_index)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT DO NOTHING
-	`, sessionID, emailID, linkURL, linkIndex)
+	// Check if this session already clicked this link in the last 5 minutes
+	var exists bool
+	err := s.metricsPool.QueryRow(ctx, `
+		SELECT EXISTS(
+			SELECT 1 FROM email_link_clicks
+			WHERE session_id = $1
+			  AND email_id = $2
+			  AND link_index = $3
+			  AND time > NOW() - INTERVAL '5 minutes'
+			LIMIT 1
+		)
+	`, sessionID, emailID, linkIndex).Scan(&exists)
 	
-	return err
+	if err != nil {
+		return err
+	}
+	
+	// Only insert if not already clicked in last 5 minutes
+	if !exists {
+		_, err = s.metricsPool.Exec(ctx, `
+			INSERT INTO email_link_clicks (session_id, email_id, link_url, link_index)
+			VALUES ($1, $2, $3, $4)
+		`, sessionID, emailID, linkURL, linkIndex)
+		return err
+	}
+	
+	return nil
 }
 
 func (s *Store) GetMetricsViewCount(ctx context.Context, emailID string) (int64, error) {
