@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { getEmailBySlug, getEmails } from '@/lib/cms';
 import { MailingListBadge } from '@/components/MailingListBadge';
 import { ViewTracker } from '@/components/ViewTracker';
-import { ViewCount } from '@/components/ViewCount';
+import { EmailStats } from '@/components/EmailStats';
 import { notFound } from 'next/navigation';
 import { Metadata } from 'next';
 
@@ -128,21 +128,16 @@ export default async function EmailDetailPage({ params }: EmailDetailPageProps) 
             <div className="flex items-center justify-between">
               <MailingListBadge mailingList={email.mailing_list} />
 
-              <div className="flex items-center space-x-6 text-sm text-gray-500">
-                <div className="flex items-center space-x-2">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                  </svg>
-                  <ViewCount emailId={email.id} initialViews={email.stats.views ?? email.stats.opens} />
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 15l-2 5L9 9l11 4-5 2zm0 0l5 5M7.188 2.239l.777 2.897M5.136 7.965l-2.898-.777M13.95 4.05l-2.122 2.122m-5.657 5.656l-2.12 2.122" />
-                  </svg>
-                  <span>{email.stats.clicks.toLocaleString()} link clicks</span>
-                </div>
+              <div className="flex items-center space-x-2 text-sm text-gray-500">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+                <EmailStats 
+                  emailId={email.id} 
+                  initialViews={email.stats.views} 
+                  initialClicks={email.stats.clicks} 
+                />
               </div>
             </div>
           </div>

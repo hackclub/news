@@ -18,7 +18,7 @@ export interface EmailStats {
   sent_count: number;
   opens: number;
   clicks: number;
-  views?: number;
+  views: number;
   unsubscribes: number;
   hard_bounces: number;
   soft_bounces: number;
