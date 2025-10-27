@@ -1210,20 +1210,32 @@ func trustProxyRealIP(trustedCIDRs []*net.IPNet) func(http.Handler) http.Handler
 }
 
 func corsMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
+	localhostRegex := regexp.MustCompile(`^https?://localhost(:\d+)?$|^https?://127\.0\.0\.1(:\d+)?$|^https?://\[::1\](:\d+)?$`)
+	
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			origin := r.Header.Get("Origin")
 			
-			if origin != "" && len(allowedOrigins) > 0 {
-				for _, allowed := range allowedOrigins {
-					if origin == allowed || allowed == "*" {
-						w.Header().Set("Access-Control-Allow-Origin", origin)
-						w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-						w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-						w.Header().Set("Access-Control-Allow-Credentials", "true")
-						w.Header().Set("Access-Control-Max-Age", "86400")
-						break
+			if origin != "" {
+				allowed := false
+				
+				if localhostRegex.MatchString(origin) {
+					allowed = true
+				} else if len(allowedOrigins) > 0 {
+					for _, allowedOrigin := range allowedOrigins {
+						if origin == allowedOrigin || allowedOrigin == "*" {
+							allowed = true
+							break
+						}
 					}
+				}
+				
+				if allowed {
+					w.Header().Set("Access-Control-Allow-Origin", origin)
+					w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+					w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+					w.Header().Set("Access-Control-Allow-Credentials", "true")
+					w.Header().Set("Access-Control-Max-Age", "86400")
 				}
 			}
 			
