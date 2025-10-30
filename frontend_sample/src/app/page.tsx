@@ -1,8 +1,10 @@
-import { getEmails, getAllMailingLists } from '@/lib/cms';
-import { HomePageClient } from '@/components/HomePageClient';
+import { getEmails, getAllMailingLists } from "@/lib/cms";
+import { HomePageClient } from "@/components/HomePageClient";
+import Image from "next/image";
+import Icon from "@hackclub/icons";
 
 // Force static generation
-export const dynamic = 'force-static';
+export const dynamic = "force-static";
 export const revalidate = false;
 
 export default async function Home() {
@@ -11,35 +13,46 @@ export default async function Home() {
   const mailingLists = await getAllMailingLists();
 
   return (
-    <div className="min-h-screen bg-white">
+    <div className="min-h-screen bg-background">
+      <div className="relative h-32 bg-background mb-8">
+        <a href="https://hackclub.com/">
+          <Image
+            src="https://assets.hackclub.com/flag-orpheus-top.svg"
+            alt="Hack Club"
+            width={256}
+            height={128}
+            style={{ position: "absolute", left: 30 }}
+          />
+        </a>
+      </div>
       <div className="max-w-4xl mx-auto px-6 py-12">
-        <header className="mb-16 text-center">
-          <div className="mb-8">
-            <h1 className="text-5xl font-bold text-gray-900 mb-4 tracking-tight">
-              News
-            </h1>
-            <p className="text-xl text-gray-600 max-w-2xl mx-auto leading-relaxed">
+        <header className="mb-16 text-start">
+          <div className="mb-8 flex-col items-start justify-start">
+            <div className="flex flex-row mb-4">
+              <Icon
+                glyph="announcement"
+                className=" text-red h-auto w-12 mr-4"
+              />
+              <h1 className="text-5xl text-red font-bold">HACKCLUB NEWS!</h1>
+            </div>
+            <p className="text-xl text-muted">
               Dispatches from the Hack Club community
             </p>
           </div>
-          
-          <div className="flex items-center justify-center space-x-6 text-sm text-gray-500">
-            <div className="flex items-center space-x-2">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 4.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-              </svg>
-              <span>Loading posts...</span>
+
+          <div className="flex items-start justify-start space-x-6 text-sm text-muted">
+            <div className="flex items-center space-x-2 bg-dark">
+              <Icon glyph="email" className="h-4 w-4" />
+              <span className="text-snow">Loading posts...</span>
             </div>
             <div className="flex items-center space-x-2">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4" />
-              </svg>
-              <span>RSS</span>
+              <Icon glyph="rss" className="h-4 w-4" />
+              <span className="text-snow">RSS</span>
             </div>
           </div>
         </header>
 
-        <HomePageClient 
+        <HomePageClient
           initialPosts={posts}
           initialNextOffset={postsResponse.next_offset}
           mailingLists={mailingLists}
