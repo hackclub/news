@@ -8,18 +8,25 @@ import { EmailCard } from "@/components/EmailCard";
 import { notFound } from "next/navigation";
 import { getClosestColor } from "@/lib/utils";
 import Icon from "@hackclub/icons";
+import { DYNAMIC_ROUTE_CONFIG } from "@/lib/isr-config";
 
-// Force static generation
-export const dynamic = "force-static";
-export const revalidate = false;
+// Use ISR: statically generate pages but revalidate every 5 minutes
+export const revalidate = DYNAMIC_ROUTE_CONFIG.revalidate;
+export const dynamicParams = DYNAMIC_ROUTE_CONFIG.dynamicParams;
 
-// Generate static params for all mailing lists
+// Generate static params for mailing lists at build time (for better performance)
 export async function generateStaticParams() {
-  const mailingLists = await getAllMailingLists();
+  try {
+    const mailingLists = await getAllMailingLists();
 
-  return mailingLists.map((mailingList) => ({
-    mailing_list_slug: mailingList.slug,
-  }));
+    return mailingLists.map((mailingList) => ({
+      mailing_list_slug: mailingList.slug,
+    }));
+  } catch (error) {
+    console.error('Error generating static params:', error);
+    // Return empty array on error to allow dynamic generation
+    return [];
+  }
 }
 
 interface MailingListPageProps {

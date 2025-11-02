@@ -1,4 +1,6 @@
 // CMS API client for Hack Club Email CMS
+import { FETCH_CACHE_CONFIG } from './isr-config';
+
 const CMS_BASE_URL = process.env.CMS_API_BASE_URL || 'http://localhost:8080';
 
 export interface MailingList {
@@ -68,9 +70,7 @@ export async function getEmails(
     params.append('mailing_list_id', mailing_list_id);
   }
 
-  const response = await fetch(`${CMS_BASE_URL}/emails?${params}`, {
-    next: { revalidate: 30 }, // Cache for 30 seconds
-  });
+  const response = await fetch(`${CMS_BASE_URL}/emails?${params}`, FETCH_CACHE_CONFIG);
 
   if (!response.ok) {
     throw new Error(`Failed to fetch emails: ${response.statusText}`);
@@ -89,9 +89,7 @@ export async function getMailingLists(
     offset: offset.toString(),
   });
 
-  const response = await fetch(`${CMS_BASE_URL}/mailing_lists?${params}`, {
-    next: { revalidate: 30 },
-  });
+  const response = await fetch(`${CMS_BASE_URL}/mailing_lists?${params}`, FETCH_CACHE_CONFIG);
 
   if (!response.ok) {
     throw new Error(`Failed to fetch mailing lists: ${response.statusText}`);
@@ -110,9 +108,7 @@ export async function getMailingListsWithEmails(
     limit_per_list: limit_per_list.toString(),
   });
 
-  const response = await fetch(`${CMS_BASE_URL}/mailing_lists/emails?${params}`, {
-    next: { revalidate: 30 },
-  });
+  const response = await fetch(`${CMS_BASE_URL}/mailing_lists/emails?${params}`, FETCH_CACHE_CONFIG);
 
   if (!response.ok) {
     throw new Error(`Failed to fetch mailing lists with emails: ${response.statusText}`);
@@ -122,26 +118,41 @@ export async function getMailingListsWithEmails(
 }
 
 // Find email by slug (searches through all emails)
-export async function getEmailBySlug(slug: string): Promise<Email | null> {
+export async function getEmailBySlug(slug: string, skipCache: boolean = false): Promise<Email | null> {
   try {
     // Search through multiple pages of emails to find the one with matching slug
     let offset = 0;
     const limit = 50;
     
     while (true) {
-      const response = await getEmails(limit, offset);
-      const email = response.items.find(email => email.slug === slug);
+      const params = new URLSearchParams({
+        limit: limit.toString(),
+        offset: offset.toString(),
+      });
+
+      const fetchOptions: RequestInit = skipCache 
+        ? { cache: 'no-store' } // Bypass cache for dynamic pages
+        : FETCH_CACHE_CONFIG;
+
+      const response = await fetch(`${CMS_BASE_URL}/emails?${params}`, fetchOptions);
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch emails: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      const email = data.items.find((email: Email) => email.slug === slug);
       
       if (email) {
         return email;
       }
       
       // If no more emails or no next_offset, we've searched everything
-      if (!response.next_offset || response.items.length === 0) {
+      if (!data.next_offset || data.items.length === 0) {
         break;
       }
       
-      offset = response.next_offset;
+      offset = data.next_offset;
     }
     
     return null;

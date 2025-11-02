@@ -7,6 +7,7 @@ import { notFound } from "next/navigation";
 import { Metadata } from "next";
 import { getClosestColor } from "@/lib/utils";
 import Icon from "@hackclub/icons";
+import { DYNAMIC_ROUTE_CONFIG } from "@/lib/isr-config";
 
 // Extract body content from email HTML to prevent hydration issues
 function extractBodyContent(html: string): string {
@@ -26,19 +27,25 @@ function extractBodyContent(html: string): string {
   return html;
 }
 
-// Force static generation
-export const dynamic = "force-static";
-export const revalidate = false;
+// Use ISR: statically generate pages but revalidate every 5 minutes
+export const revalidate = DYNAMIC_ROUTE_CONFIG.revalidate;
+export const dynamicParams = DYNAMIC_ROUTE_CONFIG.dynamicParams;
 
-// Generate static params for all emails
+// Generate static params for emails at build time (for better performance)
 export async function generateStaticParams() {
-  const emailsResponse = await getEmails(1000, 0); // Get all emails for static generation
-  const emails = emailsResponse.items;
+  try {
+    const emailsResponse = await getEmails(1000, 0); // Get all emails for static generation
+    const emails = emailsResponse.items;
 
-  return emails.map((email) => ({
-    mailing_list_slug: email.mailing_list.slug,
-    email_slug: email.slug,
-  }));
+    return emails.map((email) => ({
+      mailing_list_slug: email.mailing_list.slug,
+      email_slug: email.slug,
+    }));
+  } catch (error) {
+    console.error('Error generating static params:', error);
+    // Return empty array on error to allow dynamic generation
+    return [];
+  }
 }
 
 interface EmailDetailPageProps {
