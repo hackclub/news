@@ -33,7 +33,7 @@ export default async function Home() {
                 glyph="announcement"
                 className=" text-red h-auto w-12 mr-4"
               />
-              <h1 className="text-5xl text-red font-bold">HACKCLUB NEWS!</h1>
+              <h1 className="text-5xl text-red font-bold">HACK CLUB NEWS!</h1>
             </div>
             <p className="text-xl text-muted">
               Dispatches from the Hack Club community
