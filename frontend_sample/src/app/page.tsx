@@ -2,10 +2,8 @@ import { getEmails, getAllMailingLists } from "@/lib/cms";
 import { HomePageClient } from "@/components/HomePageClient";
 import Image from "next/image";
 import Icon from "@hackclub/icons";
-import { STATIC_ROUTE_CONFIG } from "@/lib/isr-config";
-
-// Use ISR: statically generate but revalidate every 5 minutes
-export const revalidate = STATIC_ROUTE_CONFIG.revalidate;
+// Use ISR: statically generate but revalidate every 5 minutes (300 seconds)
+export const revalidate = 300;
 
 export default async function Home() {
   const postsResponse = await getEmails(20, 0); // Start with smaller initial load

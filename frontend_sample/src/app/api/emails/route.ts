@@ -1,9 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getEmails } from '@/lib/cms';
-import { STATIC_ROUTE_CONFIG } from '@/lib/isr-config';
-
-// Use ISR: revalidate every 5 minutes for fresh data
-export const revalidate = STATIC_ROUTE_CONFIG.revalidate;
+// Use ISR: revalidate every 5 minutes for fresh data (300 seconds)
+export const revalidate = 300;
 
 export async function GET(request: NextRequest) {
   try {

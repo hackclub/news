@@ -7,8 +7,6 @@ import { notFound } from "next/navigation";
 import { Metadata } from "next";
 import { getClosestColor } from "@/lib/utils";
 import Icon from "@hackclub/icons";
-import { DYNAMIC_ROUTE_CONFIG } from "@/lib/isr-config";
-
 // Extract body content from email HTML to prevent hydration issues
 function extractBodyContent(html: string): string {
   // Try to extract content between <body> tags
@@ -27,9 +25,9 @@ function extractBodyContent(html: string): string {
   return html;
 }
 
-// Use ISR: statically generate pages but revalidate every 5 minutes
-export const revalidate = DYNAMIC_ROUTE_CONFIG.revalidate;
-export const dynamicParams = DYNAMIC_ROUTE_CONFIG.dynamicParams;
+// Use ISR: statically generate pages but revalidate every 5 minutes (300 seconds)
+export const revalidate = 300;
+export const dynamicParams = true;
 
 // Generate static params for emails at build time (for better performance)
 export async function generateStaticParams() {

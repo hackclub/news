@@ -8,11 +8,9 @@ import { EmailCard } from "@/components/EmailCard";
 import { notFound } from "next/navigation";
 import { getClosestColor } from "@/lib/utils";
 import Icon from "@hackclub/icons";
-import { DYNAMIC_ROUTE_CONFIG } from "@/lib/isr-config";
-
-// Use ISR: statically generate pages but revalidate every 5 minutes
-export const revalidate = DYNAMIC_ROUTE_CONFIG.revalidate;
-export const dynamicParams = DYNAMIC_ROUTE_CONFIG.dynamicParams;
+// Use ISR: statically generate pages but revalidate every 5 minutes (300 seconds)
+export const revalidate = 300;
+export const dynamicParams = true;
 
 // Generate static params for mailing lists at build time (for better performance)
 export async function generateStaticParams() {
