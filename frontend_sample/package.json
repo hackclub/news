@@ -13,7 +13,7 @@
     "@hackclub/theme": "^0.3.3",
     "@tailwindcss/typography": "^0.5.19",
     "@theme-ui/tailwind": "^0.17.2",
-    "next": "16.0.0",
+    "next": "16.2.3",
     "react": "19.2.0",
     "react-dom": "19.2.0",
     "theme-ui": "^0.17.2"
